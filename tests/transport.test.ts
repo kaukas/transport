@@ -1,7 +1,6 @@
 import { it, expect, afterEach, afterAll, vi } from 'vitest';
 import mockFs from 'mock-fs';
 import { readFileSync } from 'fs';
-import { readFile } from 'fs/promises';
 import { ChildProcess, execSync, ExecSyncOptions, spawn } from 'child_process';
 import { setupServer } from 'msw/node';
 import { DefaultBodyType, http, HttpResponse, StrictRequest } from 'msw';
@@ -105,9 +104,9 @@ afterEach(() => {
   mockFs.restore();
 });
 
-function mockObjectSelection(stdout: string[], expectStdin?: string[]): ChildProcess {
+function mockObjectSelection(stdout: string[]): [ChildProcess, string[]] {
   const stdinLines = [];
-  const mockProcess = new EventEmitter();
+  const mockProcess = new EventEmitter() as ChildProcess;
   mockProcess.stdout = new Readable({ read() {} });
   mockProcess.stdin = new Writable({
     write(chunk, _encoding, callback) {
@@ -125,9 +124,6 @@ function mockObjectSelection(stdout: string[], expectStdin?: string[]): ChildPro
     expect(stdout).toEqual([]);
     mockProcess.stdout.push(null);
     mockProcess.emit('close', 0);
-    if (expectStdin) {
-      expect(stdinLines).toEqual(expectStdin);
-    }
   });
 
   mockProcess.stderr = new Readable({
@@ -136,7 +132,7 @@ function mockObjectSelection(stdout: string[], expectStdin?: string[]): ChildPro
     },
   });
   // mockProcess.kill = vi.fn();
-  return mockProcess;
+  return [mockProcess, stdinLines];
 }
 
 function pickOperation(name: 'Export' | 'Import' | 'Export New' | 'Open') {
@@ -207,13 +203,6 @@ function getAccessConfig(boxId: number) {
   });
 }
 
-function putAccessConfig(boxId: number) {
-  return http.put(`https://sandbox${boxId}.io/openidm/config/access`, async ({ request }) => {
-    verifyBoxToken(boxId, request);
-    return HttpResponse.json(await request.json());
-  });
-}
-
 it(
   'exports a static configuration object from a tenant',
   server.boundary(async () => {
@@ -223,8 +212,10 @@ it(
     const mockedExecSync = vi
       .mocked(execSync)
       .mockImplementationOnce(pickTenant('sandbox1'))
-      .mockImplementationOnce(pickOperation('Export'));
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+      .mockImplementationOnce(pickOperation('Export')) as typeof execSync;
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, mockedExecSync, mockedSpawn, []);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/access-config/access.json`, 'utf8'))).toEqual({ _id: 'access-config' });
@@ -235,7 +226,7 @@ it(
 it(
   'imports a static configuration object into a tenant',
   server.boundary(async () => {
-    let uploadedAccessConfig: any;
+    let uploadedAccessConfig: unknown;
     server.use(
       ...tokenHandlers,
       http.put('https://sandbox1.io/openidm/config/access', async ({ request }) => {
@@ -249,8 +240,10 @@ it(
     const mockedExecSync = vi
       .mocked(execSync)
       .mockImplementationOnce(pickTenant('sandbox1'))
-      .mockImplementationOnce(pickOperation('Import'));
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+      .mockImplementationOnce(pickOperation('Import')) as typeof execSync;
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, mockedExecSync, mockedSpawn, []);
     expect(uploadedAccessConfig).toEqual(accessConfig);
   }),
@@ -264,8 +257,10 @@ it(
     const mockedExecSync = vi
       .mocked(execSync)
       // 'sandbox2' selected by command line argument.
-      .mockImplementationOnce(pickOperation('Export'));
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+      .mockImplementationOnce(pickOperation('Export')) as typeof execSync;
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, mockedExecSync, mockedSpawn, ['sandbox2']);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/access-config/access.json`, 'utf8'))).toEqual({ _id: 'access-config' });
@@ -288,11 +283,22 @@ it('fails if multiple tenants matched', async () => {
 it(
   'accepts operation as a command line argument',
   server.boundary(async () => {
-    server.use(...tokenHandlers, putAccessConfig(2));
+    let uploadedAccessConfig: unknown;
+    server.use(
+      ...tokenHandlers,
+      http.put(`https://sandbox2.io/openidm/config/access`, async ({ request }) => {
+        verifyBoxToken(2, request);
+        uploadedAccessConfig = await request.json();
+        return HttpResponse.json(uploadedAccessConfig);
+      }),
+    );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
     // 'sandbox2', 'import' selected by command line argument.
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox2', 'import']);
+    expect(uploadedAccessConfig).toEqual(accessConfig);
   }),
 );
 
@@ -322,7 +328,9 @@ it(
       }),
     );
     mockFs({ ...stdLayout });
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['locale de\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['locale de\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/locales/de.json`, 'utf8'))).toEqual({ content: 'foo' });
@@ -345,15 +353,16 @@ it(
       }),
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
-    const mockedSpawn = vi
-      .mocked(spawn)
-      .mockImplementationOnce(() =>
-        mockObjectSelection(['locale en\n'], ['0 access-config\n', '1 locale en\n', '2 locale de\n']),
-      );
+    const [objSelection, stdinLines] = mockObjectSelection(['locale en\n']);
+    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => objSelection) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/locales/en.json`, 'utf8'))).toEqual({ content: 'foo' });
     });
+    expect(stdinLines.map((line) => line.split(' ').slice(1)).filter((parts) => parts[0] === 'locale')).toEqual([
+      ['locale', 'en\n'],
+      ['locale', 'de\n'],
+    ]);
   }),
 );
 
@@ -380,7 +389,9 @@ it(
   server.boundary(async () => {
     server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(1));
     mockFs({ ...stdLayout });
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/access-config/access.json`, 'utf8'))).toEqual({ _id: 'access-config' });
@@ -391,10 +402,21 @@ it(
 it(
   'imports access-config',
   server.boundary(async () => {
-    server.use(...tokenHandlers, putAccessConfig(1));
+    let uploadedAccessConfig: unknown;
+    server.use(
+      ...tokenHandlers,
+      http.put(`https://sandbox1.io/openidm/config/access`, async ({ request }) => {
+        verifyBoxToken(1, request);
+        uploadedAccessConfig = await request.json();
+        return HttpResponse.json(uploadedAccessConfig);
+      }),
+    );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['access-config\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
+    expect(uploadedAccessConfig).toEqual(accessConfig);
   }),
 );
 
@@ -413,7 +435,9 @@ it(
       }),
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['locale en\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
     await vi.waitFor(() => {
       expect(jparse(readFileSync(`${rootDir}/locales/en.json`, 'utf8'))).toEqual({ content: 'foo' });
@@ -424,7 +448,7 @@ it(
 it(
   'imports locales',
   server.boundary(async () => {
-    let uploadedAccessConfig: any;
+    let uploadedAccessConfig: unknown;
     server.use(
       ...tokenHandlers,
       http.put(`https://sandbox1.io/openidm/config/uilocale/en`, async ({ request }) => {
@@ -434,7 +458,9 @@ it(
       }),
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
-    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['locale en\n']));
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
     expect(uploadedAccessConfig).toEqual({ _id: 'uilocale/en' });
   }),

@@ -287,9 +287,6 @@ async function transport(rootDir, execSync, spawn, argv) {
       (async () => {
         for await (const object of objects) {
           objectsCache.push(object);
-          // if (objectsFinished) {
-          //   break;
-          // }
           cproc.stdin.write(`${objectsCache.length - 1} ${object.label}\n`);
         }
         cproc.stdin.end();

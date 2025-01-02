@@ -1,4 +1,5 @@
 // @ts-check
+
 import eslint from '@eslint/js';
 import vitest from '@vitest/eslint-plugin';
 import eslintConfigPrettier from 'eslint-config-prettier';
@@ -24,8 +25,7 @@ export default tseslint.config(
 
     languageOptions: {
       parser: tseslint.parser,
-      ecmaVersion: 2020,
-      sourceType: 'module',
+      ecmaVersion: 2022,
 
       globals: {
         ...globals.node,

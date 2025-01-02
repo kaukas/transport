@@ -9,7 +9,7 @@ const { readFile } = require('fs/promises');
 const { readFileSync, readdirSync } = require('fs');
 const idmFlatConfig = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/idmFlatConfig.js');
 const locales = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/locales.js');
-const { restPut } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
+const { restGet, restPut } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
 const { getToken } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/authenticate.js');
 const axios = require('axios');
 
@@ -156,9 +156,10 @@ async function transport(rootDir, execSync, spawn, argv) {
   /**
    * @param {string} tenant
    * @param {Operation} operation
+   * @param {Promise<string>} tokenPromise
    * @returns {AsyncGenerator<FrObject>}
    */
-  async function* listLocales(tenant, operation) {
+  async function* listLocales(tenant, operation, tokenPromise) {
     const localLocaleContents = (
       await handleNoEnt([], async () => readdirSync(join(rootDir, 'locales'), { withFileTypes: true }))
     )
@@ -166,9 +167,25 @@ async function transport(rootDir, execSync, spawn, argv) {
       .map((dirent) => readFileSync(join(dirent.parentPath, dirent.name), 'utf8'))
       .map((content) => JSON.parse(content));
     switch (operation) {
-      case 'pull':
-        yield* localLocaleContents
-          .map((content) => /** @type {string} */ (content._id.split('/')[1]))
+      case 'pull': {
+        const localeNames = localLocaleContents.map((content) => /** @type {string} */ (content._id.split('/')[1]));
+        yield* localeNames.map(
+          (localeName) =>
+            /** @type {FrObject} */ ({
+              label: `locale ${localeName}`,
+              run: (token) => locales.exportLocales(rootDir, tenant, localeName, token),
+              path: `locales/${localeName}.json`,
+            }),
+        );
+        const openidmConfigs = await restGet(
+          new URL('/openidm/config?_queryFilter=true&_fields=_id', tenant).toString(),
+          {},
+          await tokenPromise,
+        );
+        yield* openidmConfigs.data.result
+          .filter((content) => content._id.startsWith('uilocale/'))
+          .map((content) => content._id.split('/')[1])
+          .filter((localeName) => !localeNames.includes(localeName))
           .map(
             (localeName) =>
               /** @type {FrObject} */ ({
@@ -178,6 +195,7 @@ async function transport(rootDir, execSync, spawn, argv) {
               }),
           );
         return;
+      }
       case 'push':
         yield* localLocaleContents
           .map((content) => /** @type {[string, string, any]} */ ([content._id.split('/')[1], content._id, content]))
@@ -198,11 +216,12 @@ async function transport(rootDir, execSync, spawn, argv) {
   /**
    * @param {string} tenant
    * @param {Operation} operation
+   * @param {Promise<string>} tokenPromise
    * @returns {AsyncGenerator<FrObject>}
    */
-  async function* listObjects(tenant, operation) {
+  async function* listObjects(tenant, operation, tokenPromise) {
     yield* listSingletonObjects(tenant, operation);
-    yield* listLocales(tenant, operation);
+    yield* listLocales(tenant, operation, tokenPromise);
   }
 
   /**
@@ -241,10 +260,11 @@ async function transport(rootDir, execSync, spawn, argv) {
 
   /**
    * @param {string} tenant
+   * @param {Promise<string>} tokenPromise
    * @param {Operation} operation
    */
-  async function pickObjects(tenant, operation) {
-    const objects = listObjects(tenant, operation);
+  async function pickObjects(tenant, operation, tokenPromise) {
+    const objects = listObjects(tenant, operation, tokenPromise);
     const objectsCache = [];
     const cproc = spawn('fzf', [
       '--with-nth',
@@ -282,7 +302,9 @@ async function transport(rootDir, execSync, spawn, argv) {
     const [tenant, connection] = await pickTenant(argv.shift());
     const operation = pickOperation(argv.shift());
     const tokenPromise = acquireToken(tenant, connection);
-    const objects = argv.length ? await filesToObjects(tenant, operation, argv) : await pickObjects(tenant, operation);
+    const objects = argv.length
+      ? await filesToObjects(tenant, operation, argv)
+      : await pickObjects(tenant, operation, tokenPromise);
 
     return Promise.all(objects.map(async ({ run }) => run(await tokenPromise)));
   });

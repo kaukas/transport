@@ -105,37 +105,37 @@ afterEach(() => {
   mockFs.restore();
 });
 
-function mockObjectSelection(output: string[]): ChildProcess {
+function mockObjectSelection(stdout: string[], expectStdin?: string[]): ChildProcess {
+  const stdinLines = [];
   const mockProcess = new EventEmitter();
-  const expectLines = JSON.parse(JSON.stringify(output)) as string[];
-  const outputLines = [];
+  mockProcess.stdout = new Readable({ read() {} });
   mockProcess.stdin = new Writable({
     write(chunk, _encoding, callback) {
       const line = chunk.toString();
-      const idx = expectLines.indexOf(line.split(' ').slice(1).join(' '));
+      stdinLines.push(line);
+      const idx = stdout.indexOf(line.split(' ').slice(1).join(' '));
       if (idx > -1) {
-        expectLines.splice(idx, 1);
-        outputLines.push(line);
+        stdout.splice(idx, 1);
+        mockProcess.stdout.push(line);
       }
       callback();
     },
   });
-  mockProcess.stdin.on('finish', () => expect(expectLines).toEqual([]));
-
-  mockProcess.stdout = new Readable({
-    read() {
-      for (const line of outputLines) {
-        this.push(line);
-      }
-      this.push(null);
-      setTimeout(() => mockProcess.emit('close', 0));
-    },
+  mockProcess.stdin.on('finish', () => {
+    expect(stdout).toEqual([]);
+    mockProcess.stdout.push(null);
+    mockProcess.emit('close', 0);
+    if (expectStdin) {
+      expect(stdinLines).toEqual(expectStdin);
+    }
   });
+
   mockProcess.stderr = new Readable({
     read() {
       this.push(null);
     },
   });
+  // mockProcess.kill = vi.fn();
   return mockProcess;
 }
 
@@ -181,6 +181,13 @@ const tokenHandlers = [1, 2].map((boxId) =>
   }),
 );
 
+const emptyOpenidmConfig = [1, 2].map((boxId) =>
+  http.get(`https://sandbox${boxId}.io/openidm/config`, ({ request }) => {
+    verifyBoxToken(boxId, request);
+    return HttpResponse.json({ result: [] });
+  }),
+);
+
 function verifyBoxToken(boxId: number, request: StrictRequest<DefaultBodyType>) {
   const expectToken = `Bearer token${boxId}`;
   const token = request.headers.get('Authorization');
@@ -210,7 +217,7 @@ function putAccessConfig(boxId: number) {
 it(
   'exports a static configuration object from a tenant',
   server.boundary(async () => {
-    server.use(...tokenHandlers, getAccessConfig(1));
+    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(1));
     mockFs({ ...stdLayout });
 
     const mockedExecSync = vi
@@ -252,7 +259,7 @@ it(
 it(
   'accepts tenant as a command line argument',
   server.boundary(async () => {
-    server.use(...tokenHandlers, getAccessConfig(2));
+    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(2));
     mockFs({ ...stdLayout });
     const mockedExecSync = vi
       .mocked(execSync)
@@ -300,6 +307,56 @@ it(
   }),
 );
 
+it(
+  'exports an object that only exists on the tenant',
+  server.boundary(async () => {
+    server.use(
+      ...tokenHandlers,
+      http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
+        verifyBoxToken(1, request);
+        return HttpResponse.json({ result: [{ _id: 'uilocale/de' }] });
+      }),
+      http.get(`https://sandbox1.io/openidm/config/uilocale/de`, ({ request }) => {
+        verifyBoxToken(1, request);
+        return HttpResponse.json({ content: 'foo' });
+      }),
+    );
+    mockFs({ ...stdLayout });
+    const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['locale de\n']));
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
+    await vi.waitFor(() => {
+      expect(jparse(readFileSync(`${rootDir}/locales/de.json`, 'utf8'))).toEqual({ content: 'foo' });
+    });
+  }),
+);
+
+it(
+  'deduplicates objects that exist both locally and on the tenant',
+  server.boundary(async () => {
+    server.use(
+      ...tokenHandlers,
+      http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
+        verifyBoxToken(1, request);
+        return HttpResponse.json({ result: [{ _id: 'uilocale/en' }, { _id: 'uilocale/de' }] });
+      }),
+      http.get(`https://sandbox1.io/openidm/config/uilocale/en`, ({ request }) => {
+        verifyBoxToken(1, request);
+        return HttpResponse.json({ content: 'foo' });
+      }),
+    );
+    mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() =>
+        mockObjectSelection(['locale en\n'], ['0 access-config\n', '1 locale en\n', '2 locale de\n']),
+      );
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
+    await vi.waitFor(() => {
+      expect(jparse(readFileSync(`${rootDir}/locales/en.json`, 'utf8'))).toEqual({ content: 'foo' });
+    });
+  }),
+);
+
 // it('accepts filenames as command line arguments', async () => {
 //   const vol = Volume.fromJSON({
 //     ...stdLayout,
@@ -321,7 +378,7 @@ it(
 it(
   'exports access-config',
   server.boundary(async () => {
-    server.use(...tokenHandlers, getAccessConfig(1));
+    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(1));
     mockFs({ ...stdLayout });
     const mockedSpawn = vi.mocked(spawn).mockImplementationOnce(() => mockObjectSelection(['access-config\n']));
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);

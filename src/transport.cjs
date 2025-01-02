@@ -252,10 +252,17 @@ async function transport(rootDir, execSync, spawn, argv) {
    * @param {string} tenant
    * @param {Operation} operation
    * @param {string[]} argvPaths
+   * @param {Promise<string>} tokenPromise
    */
-  async function filesToObjects(tenant, operation, argvPaths) {
+  async function filesToObjects(tenant, operation, argvPaths, tokenPromise) {
     argvPaths = argvPaths.map((argvPath) => relative(rootDir, argvPath));
-    return listObjects(tenant, operation).filter(({ path }) => argvPaths.some((argvPath) => argvPath.startsWith(path)));
+    const objects = [];
+    for await (const object of listObjects(tenant, operation, tokenPromise)) {
+      if (argvPaths.some((argvPath) => argvPath.startsWith(object.path))) {
+        objects.push(object);
+      }
+    }
+    return objects;
   }
 
   /**
@@ -300,28 +307,16 @@ async function transport(rootDir, execSync, spawn, argv) {
     const operation = pickOperation(argv.shift());
     const tokenPromise = acquireToken(tenant, connection);
     const objects = argv.length
-      ? await filesToObjects(tenant, operation, argv)
+      ? await filesToObjects(tenant, operation, argv, tokenPromise)
       : await pickObjects(tenant, operation, tokenPromise);
 
     return Promise.all(objects.map(async ({ run }) => run(await tokenPromise)));
   });
   return connectionsPromise;
-
-  // } finally {
-  //   await firstRequestPromise;
-  //   axios.interceptors.request.eject(abortInterceptor);
-  //   console.log(abortControllers);
-  //   abortControllers.forEach((controller) => controller.abort());
-  // }
 }
 
 module.exports.transport = transport;
 
-// const url = import.meta.url;
-// if (url === `file://${process.argv[1]}`) {
-//   const rootDir = dirname(dirname(fileURLToPath(url)));
-//   transport(rootDir, process.argv.slice(2));
-// }
 if (require.main === module) {
   const rootDir = dirname(dirname(__filename));
   transport(rootDir, execSyncReal, spawnReal, process.argv.slice(2));

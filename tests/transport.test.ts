@@ -366,23 +366,23 @@ it(
   }),
 );
 
-// it('accepts filenames as command line arguments', async () => {
-//   const vol = Volume.fromJSON({
-//     ...stdLayout,
-//     [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }),
-//     [`${rootDir}/locales/de.json`]: jstr({ _id: 'uilocale/de' }),
-//   });
-//   let bashCmd: string;
-//   vi.mocked(execSync).mockImplementationOnce(yieldBashCommand(vol, (cmd) => (bashCmd = cmd)));
-//   await transport(rootDir, vol.promises as unknown as typeof fsPromises, [
-//     'sandbox1',
-//     'export',
-//     'locales/en.json',
-//     `${rootDir}/access-config/access.json`,
-//   ]);
-//   expect(bashCmd!).toMatch(`npx pull "sandbox1.io" access-config
-// npx pull "sandbox1.io" locales --name en`);
-// });
+it(
+  'accepts filenames as command line arguments',
+  server.boundary(async () => {
+    let uploadedAccessConfig: unknown;
+    server.use(
+      ...tokenHandlers,
+      http.put('https://sandbox1.io/openidm/config/access', async ({ request }) => {
+        verifyBoxToken(1, request);
+        uploadedAccessConfig = await request.json();
+        return HttpResponse.json(uploadedAccessConfig);
+      }),
+    );
+    mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
+    await transport(rootDir, null, null, ['sandbox1', 'import', `${rootDir}/access-config/access.json`]);
+    expect(uploadedAccessConfig).toEqual(accessConfig);
+  }),
+);
 
 it(
   'exports access-config',

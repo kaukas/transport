@@ -427,20 +427,21 @@ it(
       ...tokenHandlers,
       http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
         verifyBoxToken(1, request);
-        return HttpResponse.json({ result: [{ _id: 'uilocale/en' }] });
+        return HttpResponse.json({ result: [{ _id: 'uilocale/en' }, { _id: 'uilocale/de' }] });
       }),
-      http.get(`https://sandbox1.io/openidm/config/uilocale/en`, ({ request }) => {
+      http.get(`https://sandbox1.io/openidm/config/uilocale/:locale`, ({ request, params }) => {
         verifyBoxToken(1, request);
-        return HttpResponse.json({ content: 'foo' });
+        return HttpResponse.json({ content: params.locale });
       }),
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
     const mockedSpawn = vi
       .mocked(spawn)
-      .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
+      .mockImplementationOnce(() => mockObjectSelection(['locale en\n', 'locale de\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
     await vi.waitFor(() => {
-      expect(jparse(readFileSync(`${rootDir}/locales/en.json`, 'utf8'))).toEqual({ content: 'foo' });
+      expect(jparse(readFileSync(`${rootDir}/locales/en.json`, 'utf8'))).toEqual({ content: 'en' });
+      expect(jparse(readFileSync(`${rootDir}/locales/de.json`, 'utf8'))).toEqual({ content: 'de' });
     });
   }),
 );
@@ -465,3 +466,65 @@ it(
     expect(uploadedAccessConfig).toEqual({ _id: 'uilocale/en' });
   }),
 );
+
+it(
+  'exports email templates',
+  server.boundary(async () => {
+    server.use(
+      ...tokenHandlers,
+      http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
+        verifyBoxToken(1, request);
+        const qf = new URL(request.url).searchParams.get('_queryFilter');
+        switch (qf) {
+          case 'true':
+            return HttpResponse.json({ result: [{ _id: 'emailTemplate/hi' }, { _id: 'emailTemplate/bye' }] });
+          case '_id sw "emailTemplate"':
+            return HttpResponse.json({
+              result: [
+                { _id: 'emailTemplate/hi', content: 'hi' },
+                { _id: 'emailTemplate/bye', content: 'bye' },
+              ],
+            });
+          default:
+            return new HttpResponse('Not found', { status: 404 });
+        }
+      }),
+    );
+    mockFs({ ...stdLayout, [`${rootDir}/email-templates/hi/hi.json`]: jstr({ _id: 'emailTemplate/hi' }) });
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['email hi\n', 'email bye\n'])[0]) as unknown as typeof spawn;
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
+    await vi.waitFor(() => {
+      expect(jparse(readFileSync(`${rootDir}/email-templates/hi/hi.json`, 'utf8'))).toEqual({
+        _id: 'emailTemplate/hi',
+        content: 'hi',
+      });
+      expect(jparse(readFileSync(`${rootDir}/email-templates/bye/bye.json`, 'utf8'))).toEqual({
+        _id: 'emailTemplate/bye',
+        content: 'bye',
+      });
+    });
+  }),
+);
+
+// it(
+//   'imports email templates',
+//   server.boundary(async () => {
+//     let uploadedAccessConfig: unknown;
+//     server.use(
+//       ...tokenHandlers,
+//       http.put(`https://sandbox1.io/openidm/config/uilocale/en`, async ({ request }) => {
+//         verifyBoxToken(1, request);
+//         uploadedAccessConfig = await request.json();
+//         return HttpResponse.json(uploadedAccessConfig);
+//       }),
+//     );
+//     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
+//     const mockedSpawn = vi
+//       .mocked(spawn)
+//       .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
+//     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
+//     expect(uploadedAccessConfig).toEqual({ _id: 'uilocale/en' });
+//   }),
+// );

@@ -6,12 +6,15 @@ const { execSync: execSyncReal, spawn: spawnReal } = require('child_process');
 const { join, dirname, relative } = require('path');
 const { homedir } = require('os');
 const { readFile } = require('fs/promises');
-const { readFileSync, readdirSync } = require('fs');
+const { glob } = require('glob');
+const { readFileSync } = require('fs');
+const axios = require('axios');
+
+const { restGet, restPut } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
 const idmFlatConfig = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/idmFlatConfig.js');
 const locales = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/locales.js');
-const { restGet, restPut } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
+const emailTemplates = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/emailTemplates.js');
 const { getToken } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/authenticate.js');
-const axios = require('axios');
 
 /**
  * Catch file or directory missing and return an empty replacement.
@@ -136,7 +139,7 @@ async function transport(rootDir, execSync, spawn, argv) {
         return;
       case 'push': {
         const accessConfigContent = await handleNoEnt(null, async () =>
-          // FIXME: readFile throws "ENXIO: no such device or address, read"
+          // FIXME: in tests, readFile throws "ENXIO: no such device or address, read"
           JSON.parse(readFileSync(join(rootDir, 'access-config', 'access.json'), 'utf8')),
         );
         if (accessConfigContent) {
@@ -156,44 +159,31 @@ async function transport(rootDir, execSync, spawn, argv) {
   /**
    * @param {string} tenant
    * @param {Operation} operation
-   * @param {Promise<string>} tokenPromise
+   * @param {{ openidmConfigNames: Promise<string[]> } | undefined} cachedQueries
    * @returns {AsyncGenerator<FrObject>}
    */
-  async function* listLocales(tenant, operation, tokenPromise) {
-    const localLocaleContents = (
-      await handleNoEnt([], async () => readdirSync(join(rootDir, 'locales'), { withFileTypes: true }))
-    )
-      .filter((dirent) => dirent.isFile() && dirent.name.endsWith('.json'))
-      .map((dirent) => readFileSync(join(dirent.parentPath, dirent.name), 'utf8'))
+  async function* listLocales(tenant, operation, cachedQueries) {
+    const localLocaleContents = (await glob(join(rootDir, 'locales', '*.json')))
+      .map((filePath) => readFileSync(filePath, 'utf8'))
       .map((content) => JSON.parse(content));
     switch (operation) {
       case 'pull': {
+        /**
+         * @param {string} name
+         * @returns {FrObject}
+         */
+        const pull = (name) => ({
+          label: `locale ${name}`,
+          run: (token) => locales.exportLocales(rootDir, tenant, name, token),
+          path: `locales/${name}.json`,
+        });
         const localeNames = localLocaleContents.map((content) => /** @type {string} */ (content._id.split('/')[1]));
-        yield* localeNames.map(
-          (localeName) =>
-            /** @type {FrObject} */ ({
-              label: `locale ${localeName}`,
-              run: (token) => locales.exportLocales(rootDir, tenant, localeName, token),
-              path: `locales/${localeName}.json`,
-            }),
-        );
-        const openidmConfigs = await restGet(
-          new URL('/openidm/config?_queryFilter=true&_fields=_id', tenant).toString(),
-          {},
-          await tokenPromise,
-        );
-        yield* openidmConfigs.data.result
-          .filter((content) => content._id.startsWith('uilocale/'))
-          .map((content) => content._id.split('/')[1])
+        yield* localeNames.map(pull);
+        yield* ((await cachedQueries.openidmConfigNames) ?? [])
+          .filter((id) => id.startsWith('uilocale/'))
+          .map((id) => /** @type {string} */ (id.split('/')[1]))
           .filter((localeName) => !localeNames.includes(localeName))
-          .map(
-            (localeName) =>
-              /** @type {FrObject} */ ({
-                label: `locale ${localeName}`,
-                run: (token) => locales.exportLocales(rootDir, tenant, localeName, token),
-                path: `locales/${localeName}.json`,
-              }),
-          );
+          .map(pull);
         return;
       }
       case 'push':
@@ -216,12 +206,80 @@ async function transport(rootDir, execSync, spawn, argv) {
   /**
    * @param {string} tenant
    * @param {Operation} operation
+   * @param {{ openidmConfigNames: Promise<string[]> } | undefined} cachedQueries
+   * @returns {AsyncGenerator<FrObject>}
+   */
+  async function* listEmailTemplates(tenant, operation, cachedQueries) {
+    const localEmailContents = (await glob(join(rootDir, 'email-templates', '**', '*.json')))
+      .map((filePath) => readFileSync(filePath, 'utf8'))
+      .map((content) => JSON.parse(content));
+    switch (operation) {
+      case 'pull': {
+        /**
+         * @param {string} name
+         * @returns {FrObject}
+         */
+        const pull = (name) => ({
+          label: `email ${name}`,
+          run: (token) => emailTemplates.exportEmailTemplates(rootDir, tenant, name, token),
+          path: `email-templates/${name}.json`,
+        });
+        const emailNames = localEmailContents.map((content) => /** @type {string} */ (content._id.split('/')[1]));
+        yield* emailNames.map(pull);
+        yield* ((await cachedQueries.openidmConfigNames) ?? [])
+          .filter((id) => id.startsWith('emailTemplate/'))
+          .map((id) => /** @type {string} */ (id.split('/')[1]))
+          .filter((emailName) => !emailNames.includes(emailName))
+          .map(pull);
+        return;
+      }
+      case 'push':
+        // yield* localLocaleContents
+        //   .map((content) => /** @type {[string, string, any]} */ ([content._id.split('/')[1], content._id, content]))
+        //   .map(
+        //     ([localeName, localeId, content]) =>
+        //       /** @type {FrObject} */ ({
+        //         label: `locale ${localeName}`,
+        //         run: (token) => restPut(new URL(`/openidm/config/${localeId}`, tenant).toString(), content, token),
+        //         path: `locales/${localeName}.json`,
+        //       }),
+        //   );
+        return;
+      default:
+        throw new Error(`Unsupported operation: ${operation}`);
+    }
+  }
+
+  /**
+   * @param {string} tenant
+   * @param {Operation} operation
+   * @param {Promise<string>} tokenPromise
+   * @returns {{ openidmConfigNames: Promise<string[]> } | undefined}
+   */
+  function cacheQueryResults(tenant, operation, tokenPromise) {
+    if (operation === 'pull') {
+      return {
+        openidmConfigNames: tokenPromise
+          .then((token) =>
+            restGet(new URL('/openidm/config?_queryFilter=true&_fields=_id', tenant).toString(), {}, token),
+          )
+          .then((response) => response.data.result.map((/** @type {{ _id: string }} */ content) => content._id)),
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * @param {string} tenant
+   * @param {Operation} operation
    * @param {Promise<string>} tokenPromise
    * @returns {AsyncGenerator<FrObject>}
    */
   async function* listObjects(tenant, operation, tokenPromise) {
+    const queryCaches = cacheQueryResults(tenant, operation, tokenPromise);
     yield* listSingletonObjects(tenant, operation);
-    yield* listLocales(tenant, operation, tokenPromise);
+    yield* listLocales(tenant, operation, queryCaches);
+    yield* listEmailTemplates(tenant, operation, queryCaches);
   }
 
   /**

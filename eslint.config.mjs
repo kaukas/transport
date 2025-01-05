@@ -15,6 +15,25 @@ export default tseslint.config(
   {
     extends: [...tseslint.configs.recommended],
 
+    files: ['**/*.js', '**/*.cjs'],
+
+    plugins: {},
+
+    rules: {},
+
+    languageOptions: {
+      ecmaVersion: 2022,
+
+      globals: {
+        ...globals.node,
+      },
+
+      parserOptions: {},
+    },
+  },
+  {
+    extends: [...tseslint.configs.recommended],
+
     files: ['**/*.ts', '**/*.mts'],
 
     plugins: {
@@ -56,6 +75,7 @@ export default tseslint.config(
     languageOptions: {
       globals: {
         ...vitest.environments.env.globals,
+        ...globals.node,
       },
     },
   },

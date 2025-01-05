@@ -10,29 +10,34 @@ const { glob } = require('glob');
 const { readFileSync } = require('fs');
 const axios = require('axios');
 
-const { restGet, restPut } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
+const { getToken } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/authenticate.js');
+const { restGet } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
+const {
+  updateIdmAccessConfig,
+  updateLocales,
+  updateEmailTemplates,
+} = require('@forgerock/fr-config-manager/packages/fr-config-push/src/scripts');
+const emailTemplates = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/emailTemplates.js');
 const idmFlatConfig = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/idmFlatConfig.js');
 const locales = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/locales.js');
-const emailTemplates = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/emailTemplates.js');
-const { getToken } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/authenticate.js');
 
-/**
- * Catch file or directory missing and return an empty replacement.
- *
- * @template ObjType
- * @param {ObjType} emptyObj
- * @param {() => Promise<ObjType>} callback
- */
-async function handleNoEnt(emptyObj, callback) {
-  try {
-    return await callback();
-  } catch (e) {
-    if (e.code === 'ENOENT') {
-      return emptyObj;
-    }
-    throw e;
-  }
-}
+// /**
+//  * Catch file or directory missing and return an empty replacement.
+//  *
+//  * @template ObjType
+//  * @param {ObjType} emptyObj
+//  * @param {() => Promise<ObjType>} callback
+//  */
+// async function handleNoEnt(emptyObj, callback) {
+//   try {
+//     return await callback();
+//   } catch (e) {
+//     if (e.code === 'ENOENT') {
+//       return emptyObj;
+//     }
+//     throw e;
+//   }
+// }
 
 /** @typedef {'pull' | 'push'} Operation */
 /**
@@ -81,6 +86,26 @@ function withAxiosInterceptors(callback) {
  * @returns {Promise<void>}
  */
 async function transport(rootDir, execSync, spawn, argv) {
+  /**
+   * @template T
+   * @param {string} tenant
+   * @param {{ (): Promise<T> }} callback
+   * @returns T
+   */
+  function withFCMEnv(tenant, callback) {
+    const originalConsoleLog = console.log;
+    try {
+      console.log = () => {};
+      process.env.CONFIG_DIR = rootDir;
+      process.env.TENANT_BASE_URL = tenant;
+      return callback();
+    } finally {
+      delete process.env.CONFIG_DIR;
+      delete process.env.TENANT_BASE_URL;
+      console.log = originalConsoleLog;
+    }
+  }
+
   /**
    * @param {string | undefined} argvOperation
    * @returns {Operation}
@@ -138,14 +163,11 @@ async function transport(rootDir, execSync, spawn, argv) {
         };
         return;
       case 'push': {
-        const accessConfigContent = await handleNoEnt(null, async () =>
-          // FIXME: in tests, readFile throws "ENXIO: no such device or address, read"
-          JSON.parse(readFileSync(join(rootDir, 'access-config', 'access.json'), 'utf8')),
-        );
-        if (accessConfigContent) {
+        const matchingPaths = await glob(join(rootDir, 'access-config', 'access.json'));
+        if (matchingPaths.length) {
           yield {
             label: 'access-config',
-            run: (token) => restPut(new URL('/openidm/config/access', tenant).toString(), accessConfigContent, token),
+            run: (token) => withFCMEnv(tenant, () => updateIdmAccessConfig({}, token)),
             path: 'access-config',
           };
         }
@@ -188,12 +210,12 @@ async function transport(rootDir, execSync, spawn, argv) {
       }
       case 'push':
         yield* localLocaleContents
-          .map((content) => /** @type {[string, string, any]} */ ([content._id.split('/')[1], content._id, content]))
+          .map((content) => /** @type {string} */ (content._id.split('/')[1]))
           .map(
-            ([localeName, localeId, content]) =>
+            (localeName) =>
               /** @type {FrObject} */ ({
                 label: `locale ${localeName}`,
-                run: (token) => restPut(new URL(`/openidm/config/${localeId}`, tenant).toString(), content, token),
+                run: (token) => withFCMEnv(tenant, () => updateLocales({ name: localeName }, token)),
                 path: `locales/${localeName}.json`,
               }),
           );
@@ -234,16 +256,16 @@ async function transport(rootDir, execSync, spawn, argv) {
         return;
       }
       case 'push':
-        // yield* localLocaleContents
-        //   .map((content) => /** @type {[string, string, any]} */ ([content._id.split('/')[1], content._id, content]))
-        //   .map(
-        //     ([localeName, localeId, content]) =>
-        //       /** @type {FrObject} */ ({
-        //         label: `locale ${localeName}`,
-        //         run: (token) => restPut(new URL(`/openidm/config/${localeId}`, tenant).toString(), content, token),
-        //         path: `locales/${localeName}.json`,
-        //       }),
-        //   );
+        yield* localEmailContents
+          .map((content) => /** @type {string} */ (content._id.split('/')[1]))
+          .map(
+            (emailName) =>
+              /** @type {FrObject} */ ({
+                label: `email ${emailName}`,
+                run: (token) => withFCMEnv(tenant, () => updateEmailTemplates({ name: emailName }, token)),
+                path: `email-templates/${emailName}.json`,
+              }),
+          );
         return;
       default:
         throw new Error(`Unsupported operation: ${operation}`);

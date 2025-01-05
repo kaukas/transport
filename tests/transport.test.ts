@@ -449,13 +449,13 @@ it(
 it(
   'imports locales',
   server.boundary(async () => {
-    let uploadedAccessConfig: unknown;
+    let uploadedLocaleContent: unknown;
     server.use(
       ...tokenHandlers,
       http.put(`https://sandbox1.io/openidm/config/uilocale/en`, async ({ request }) => {
         verifyBoxToken(1, request);
-        uploadedAccessConfig = await request.json();
-        return HttpResponse.json(uploadedAccessConfig);
+        uploadedLocaleContent = await request.json();
+        return HttpResponse.json(uploadedLocaleContent);
       }),
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
@@ -463,7 +463,7 @@ it(
       .mocked(spawn)
       .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
-    expect(uploadedAccessConfig).toEqual({ _id: 'uilocale/en' });
+    expect(uploadedLocaleContent).toEqual({ _id: 'uilocale/en' });
   }),
 );
 
@@ -476,9 +476,9 @@ it(
         verifyBoxToken(1, request);
         const qf = new URL(request.url).searchParams.get('_queryFilter');
         switch (qf) {
-          case 'true':
+          case 'true': // openidm list query by transport
             return HttpResponse.json({ result: [{ _id: 'emailTemplate/hi' }, { _id: 'emailTemplate/bye' }] });
-          case '_id sw "emailTemplate"':
+          case '_id sw "emailTemplate"': // email list query by fcm
             return HttpResponse.json({
               result: [
                 { _id: 'emailTemplate/hi', content: 'hi' },
@@ -508,23 +508,23 @@ it(
   }),
 );
 
-// it(
-//   'imports email templates',
-//   server.boundary(async () => {
-//     let uploadedAccessConfig: unknown;
-//     server.use(
-//       ...tokenHandlers,
-//       http.put(`https://sandbox1.io/openidm/config/uilocale/en`, async ({ request }) => {
-//         verifyBoxToken(1, request);
-//         uploadedAccessConfig = await request.json();
-//         return HttpResponse.json(uploadedAccessConfig);
-//       }),
-//     );
-//     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
-//     const mockedSpawn = vi
-//       .mocked(spawn)
-//       .mockImplementationOnce(() => mockObjectSelection(['locale en\n'])[0]) as unknown as typeof spawn;
-//     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
-//     expect(uploadedAccessConfig).toEqual({ _id: 'uilocale/en' });
-//   }),
-// );
+it(
+  'imports email templates',
+  server.boundary(async () => {
+    let uploadedEmailContent: unknown;
+    server.use(
+      ...tokenHandlers,
+      http.put(`https://sandbox1.io/openidm/config/emailTemplate/hi`, async ({ request }) => {
+        verifyBoxToken(1, request);
+        uploadedEmailContent = await request.json();
+        return HttpResponse.json(uploadedEmailContent);
+      }),
+    );
+    mockFs({ ...stdLayout, [`${rootDir}/email-templates/hi/hi.json`]: jstr({ _id: 'emailTemplate/hi' }) });
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['email hi\n'])[0]) as unknown as typeof spawn;
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
+    expect(uploadedEmailContent).toEqual({ _id: 'emailTemplate/hi' });
+  }),
+);

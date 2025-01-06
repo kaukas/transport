@@ -3,7 +3,7 @@
 // @ts-check
 
 const { execSync: execSyncReal, spawn: spawnReal } = require('child_process');
-const { join, dirname, relative } = require('path');
+const { join, dirname, relative, basename } = require('path');
 const { homedir } = require('os');
 const { readFile } = require('fs/promises');
 const { glob } = require('glob');
@@ -13,13 +13,17 @@ const axios = require('axios');
 const { getToken } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/authenticate.js');
 const { restGet } = require('@forgerock/fr-config-manager/packages/fr-config-common/src/restClient.js');
 const {
+  exportEmailTemplates,
+} = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/emailTemplates.js');
+const { exportConfig } = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/idmFlatConfig.js');
+const { exportJourneys } = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/journeys.js');
+const { exportLocales } = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/locales.js');
+const {
+  updateAuthTrees,
+  updateEmailTemplates,
   updateIdmAccessConfig,
   updateLocales,
-  updateEmailTemplates,
 } = require('@forgerock/fr-config-manager/packages/fr-config-push/src/scripts');
-const emailTemplates = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/emailTemplates.js');
-const idmFlatConfig = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/idmFlatConfig.js');
-const locales = require('@forgerock/fr-config-manager/packages/fr-config-pull/src/scripts/locales.js');
 
 // /**
 //  * Catch file or directory missing and return an empty replacement.
@@ -130,7 +134,7 @@ async function transport(rootDir, execSync, spawn, argv) {
     return fzfOperations[operationSelection];
   }
 
-  const connectionsPromise = readFile(join(homedir(), '.config', 'transport', 'connections.json'), 'utf8').then(
+  const connectionsPromise = readFile(join(homedir(), '.config', 'forgerock', 'connections.json'), 'utf8').then(
     (content) => JSON.parse(content),
   );
 
@@ -158,7 +162,7 @@ async function transport(rootDir, execSync, spawn, argv) {
       case 'pull':
         yield {
           label: 'access-config',
-          run: (token) => idmFlatConfig.exportConfig('access', rootDir, 'access-config', tenant, token),
+          run: (token) => exportConfig('access', rootDir, 'access-config', tenant, token),
           path: 'access-config',
         };
         return;
@@ -173,8 +177,6 @@ async function transport(rootDir, execSync, spawn, argv) {
         }
         return;
       }
-      default:
-        throw new Error(`Unsupported operation: ${operation}`);
     }
   }
 
@@ -185,43 +187,32 @@ async function transport(rootDir, execSync, spawn, argv) {
    * @returns {AsyncGenerator<FrObject>}
    */
   async function* listLocales(tenant, operation, cachedQueries) {
-    const localLocaleContents = (await glob(join(rootDir, 'locales', '*.json')))
-      .map((filePath) => readFileSync(filePath, 'utf8'))
-      .map((content) => JSON.parse(content));
+    const idToName = (/** @type {string} */ id) => id.split('/')[1];
+    const forName = (/** @type {string} */ name) => ({ label: `locale ${name}`, path: `locales/${name}.json` });
+    const localLocaleNames = (await glob(join(rootDir, 'locales', '*.json')))
+      .map((filePath) => JSON.parse(readFileSync(filePath, 'utf8')))
+      .map((content) => idToName(content._id));
     switch (operation) {
       case 'pull': {
-        /**
-         * @param {string} name
-         * @returns {FrObject}
-         */
-        const pull = (name) => ({
-          label: `locale ${name}`,
-          run: (token) => locales.exportLocales(rootDir, tenant, name, token),
-          path: `locales/${name}.json`,
-        });
-        const localeNames = localLocaleContents.map((content) => /** @type {string} */ (content._id.split('/')[1]));
-        yield* localeNames.map(pull);
+        const pull = (/** @type {string} */ name) =>
+          /** @type {FrObject} */ ({ ...forName(name), run: (token) => exportLocales(rootDir, tenant, name, token) });
+        yield* localLocaleNames.map(pull);
         yield* ((await cachedQueries.openidmConfigNames) ?? [])
           .filter((id) => id.startsWith('uilocale/'))
-          .map((id) => /** @type {string} */ (id.split('/')[1]))
-          .filter((localeName) => !localeNames.includes(localeName))
+          .map(idToName)
+          .filter((name) => !localLocaleNames.includes(name))
           .map(pull);
         return;
       }
       case 'push':
-        yield* localLocaleContents
-          .map((content) => /** @type {string} */ (content._id.split('/')[1]))
-          .map(
-            (localeName) =>
-              /** @type {FrObject} */ ({
-                label: `locale ${localeName}`,
-                run: (token) => withFCMEnv(tenant, () => updateLocales({ name: localeName }, token)),
-                path: `locales/${localeName}.json`,
-              }),
-          );
+        yield* localLocaleNames.map(
+          (name) =>
+            /** @type {FrObject} */ ({
+              ...forName(name),
+              run: (token) => withFCMEnv(tenant, () => updateLocales({ name }, token)),
+            }),
+        );
         return;
-      default:
-        throw new Error(`Unsupported operation: ${operation}`);
     }
   }
 
@@ -232,44 +223,112 @@ async function transport(rootDir, execSync, spawn, argv) {
    * @returns {AsyncGenerator<FrObject>}
    */
   async function* listEmailTemplates(tenant, operation, cachedQueries) {
-    const localEmailContents = (await glob(join(rootDir, 'email-templates', '**', '*.json')))
-      .map((filePath) => readFileSync(filePath, 'utf8'))
-      .map((content) => JSON.parse(content));
+    const idToName = (/** @type {string} */ id) => id.split('/')[1];
+    const forName = (/** @type {string} */ name) => ({ label: `email ${name}`, path: `email-templates/${name}.json` });
+    const localEmailNames = (await glob(join(rootDir, 'email-templates', '**', '*.json')))
+      .map((filePath) => JSON.parse(readFileSync(filePath, 'utf8')))
+      .map((content) => idToName(content._id));
     switch (operation) {
       case 'pull': {
-        /**
-         * @param {string} name
-         * @returns {FrObject}
-         */
-        const pull = (name) => ({
-          label: `email ${name}`,
-          run: (token) => emailTemplates.exportEmailTemplates(rootDir, tenant, name, token),
-          path: `email-templates/${name}.json`,
-        });
-        const emailNames = localEmailContents.map((content) => /** @type {string} */ (content._id.split('/')[1]));
-        yield* emailNames.map(pull);
+        const pull = (/** @type {string} */ name) =>
+          /** @type {FrObject} */ ({
+            ...forName(name),
+            run: (token) => exportEmailTemplates(rootDir, tenant, name, token),
+          });
+        yield* localEmailNames.map(pull);
         yield* ((await cachedQueries.openidmConfigNames) ?? [])
           .filter((id) => id.startsWith('emailTemplate/'))
-          .map((id) => /** @type {string} */ (id.split('/')[1]))
-          .filter((emailName) => !emailNames.includes(emailName))
+          .map(idToName)
+          .filter((emailName) => !localEmailNames.includes(emailName))
           .map(pull);
         return;
       }
       case 'push':
-        yield* localEmailContents
-          .map((content) => /** @type {string} */ (content._id.split('/')[1]))
-          .map(
-            (emailName) =>
-              /** @type {FrObject} */ ({
-                label: `email ${emailName}`,
-                run: (token) => withFCMEnv(tenant, () => updateEmailTemplates({ name: emailName }, token)),
-                path: `email-templates/${emailName}.json`,
-              }),
-          );
+        yield* localEmailNames.map(
+          (name) =>
+            /** @type {FrObject} */ ({
+              ...forName(name),
+              run: (token) => withFCMEnv(tenant, () => updateEmailTemplates({ name }, token)),
+            }),
+        );
         return;
-      default:
-        throw new Error(`Unsupported operation: ${operation}`);
     }
+  }
+
+  /**
+   * @param {string} tenant
+   * @param {Operation} operation
+   * @param {Promise<string[]>} realmsPromise
+   * @param {Promise<string>} tokenPromise
+   * @returns {AsyncGenerator<FrObject>}
+   */
+  async function* listJourneys(tenant, operation, realmsPromise, tokenPromise) {
+    const forName = (/** @type {string} */ realm, /** @type {string} */ name) => ({
+      label: `journey ${realm} ${name}`,
+      path: `realms/${realm}/journeys/${name}/${name}.json`,
+    });
+    const localRealmJourneyNames = (await glob(join(rootDir, 'realms', '*', 'journeys', '*', '*.json'))).map(
+      (filePath) =>
+        /** @type {[string, string]} */ ([
+          basename(dirname(dirname(dirname(filePath)))),
+          JSON.parse(readFileSync(filePath, 'utf8'))._id,
+        ]),
+    );
+    switch (operation) {
+      case 'pull': {
+        const pull = (/** @type {[string, string]} */ [realm, name]) =>
+          /** @type {FrObject} */ ({
+            ...forName(realm, name),
+            run: (token) => exportJourneys(join(rootDir, 'realms'), tenant, [realm], name, true, token),
+          });
+        yield* localRealmJourneyNames.map(pull);
+        const localRealmJourneyNamesSet = new Set(localRealmJourneyNames.map(([realm, name]) => `${realm}/${name}`));
+
+        const token = await tokenPromise;
+        const journeyNamesForRealms = (await realmsPromise).map((realm) =>
+          restGet(
+            new URL(
+              `/am/json/realms/root/realms/${realm}/realm-config/authentication/authenticationtrees/trees?_queryFilter=true&_fields=_id`,
+              tenant,
+            ).toString(),
+            null,
+            token,
+          ).then((/** @type {{ data: { result: { _id: string }[] } }} */ response) =>
+            response.data.result
+              .map((content) => [realm, content._id])
+              .filter(([realm, name]) => !localRealmJourneyNamesSet.has(`${realm}/${name}`))
+              .map(pull),
+          ),
+        );
+        yield* (await Promise.all(journeyNamesForRealms)).flat(1);
+        return;
+      }
+      case 'push':
+        yield* localRealmJourneyNames.map(
+          ([realm, name]) =>
+            /** @type {FrObject} */ ({
+              ...forName(realm, name),
+              run: (token) =>
+                withFCMEnv(tenant, () => updateAuthTrees({ realm, name, 'push-dependencies': true }, token)),
+            }),
+        );
+        return;
+    }
+  }
+
+  /**
+   * @param {string} tenant
+   * @param {Promise<string>} tokenPromise
+   * @returns {Promise<string[]>}
+   */
+  async function listRealms(tenant, tokenPromise) {
+    const response = await restGet(
+      new URL('/am/json/global-config/realms/?_queryFilter=true', tenant).toString(),
+      {},
+      await tokenPromise,
+    );
+    // TODO: active realms only
+    return response.data.result.map((/** @type {{ name: string }} */ realm) => realm.name);
   }
 
   /**
@@ -298,10 +357,12 @@ async function transport(rootDir, execSync, spawn, argv) {
    * @returns {AsyncGenerator<FrObject>}
    */
   async function* listObjects(tenant, operation, tokenPromise) {
+    const realmsPromise = listRealms(tenant, tokenPromise);
     const queryCaches = cacheQueryResults(tenant, operation, tokenPromise);
-    yield* listSingletonObjects(tenant, operation);
-    yield* listLocales(tenant, operation, queryCaches);
     yield* listEmailTemplates(tenant, operation, queryCaches);
+    yield* listJourneys(tenant, operation, realmsPromise, tokenPromise);
+    yield* listLocales(tenant, operation, queryCaches);
+    yield* listSingletonObjects(tenant, operation);
   }
 
   /**

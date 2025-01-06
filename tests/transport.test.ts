@@ -83,7 +83,7 @@ mjQiqHcqXFa/vOMxrbXuXoQMO6MNmbgSX9MtDVOu/jEQnYi55gNP
 const accessConfig = { _id: 'access-config' };
 const stdLayout = {
   [tmpdir()]: null,
-  [join(homedir(), '.config', 'transport', 'connections.json')]: jstr({
+  [join(homedir(), '.config', 'forgerock', 'connections.json')]: jstr({
     'https://sandbox1.io': {
       clientId: 'service-account',
       scope: 'fr:am:*',
@@ -157,32 +157,42 @@ function pickTenant(substring: string) {
   }) as typeof execSync;
 }
 
-const tokenHandlers = [1, 2].map((boxId) =>
-  http.post(`https://sandbox${boxId}.io/am/oauth2/access_token`, async ({ request }) => {
-    const form = await request.formData();
-    if (form.get('grant_type') !== 'urn:ietf:params:oauth:grant-type:jwt-bearer') {
-      return new HttpResponse('Bad grant type', { status: 400, statusText: 'Bad Request' });
-    }
-    if (form.get('client_id') !== 'service-account') {
-      return new HttpResponse('Bad service account', { status: 400, statusText: 'Bad Request' });
-    }
-    if (!((form.get('scope') as string) || '').includes('fr:am:*')) {
-      return new HttpResponse('Bad scope', { status: 400, statusText: 'Bad Request' });
-    }
-    const payload = jparse(Buffer.from((form.get('assertion') as string).split('.')[1], 'base64').toString());
-    if (payload.sub !== `id${boxId}`) {
-      return new HttpResponse('Bad service account ID', { status: 400, statusText: 'Bad Request' });
-    }
-    return HttpResponse.json({ access_token: `token${boxId}` });
-  }),
-);
-
-const emptyOpenidmConfig = [1, 2].map((boxId) =>
-  http.get(`https://sandbox${boxId}.io/openidm/config`, ({ request }) => {
-    verifyBoxToken(boxId, request);
-    return HttpResponse.json({ result: [] });
-  }),
-);
+const defaultFrHandlers = [1, 2]
+  .map((boxId) => [
+    http.post(`https://sandbox${boxId}.io/am/oauth2/access_token`, async ({ request }) => {
+      const form = await request.formData();
+      if (form.get('grant_type') !== 'urn:ietf:params:oauth:grant-type:jwt-bearer') {
+        return new HttpResponse('Bad grant type', { status: 400, statusText: 'Bad Request' });
+      }
+      if (form.get('client_id') !== 'service-account') {
+        return new HttpResponse('Bad service account', { status: 400, statusText: 'Bad Request' });
+      }
+      if (!((form.get('scope') as string) || '').includes('fr:am:*')) {
+        return new HttpResponse('Bad scope', { status: 400, statusText: 'Bad Request' });
+      }
+      const payload = jparse(Buffer.from((form.get('assertion') as string).split('.')[1], 'base64').toString());
+      if (payload.sub !== `id${boxId}`) {
+        return new HttpResponse('Bad service account ID', { status: 400, statusText: 'Bad Request' });
+      }
+      return HttpResponse.json({ access_token: `token${boxId}` });
+    }),
+    http.get(`https://sandbox${boxId}.io/am/json/global-config/realms`, ({ request }) => {
+      verifyBoxToken(boxId, request);
+      return HttpResponse.json({ result: [{ name: 'bravo' }, { name: 'alpha' }] });
+    }),
+    http.get(`https://sandbox${boxId}.io/openidm/config`, ({ request }) => {
+      verifyBoxToken(boxId, request);
+      return HttpResponse.json({ result: [] });
+    }),
+    http.get(
+      `https://sandbox${boxId}.io/am/json/realms/root/realms/:realm/realm-config/authentication/authenticationtrees/trees`,
+      ({ request }) => {
+        verifyBoxToken(boxId, request);
+        return HttpResponse.json({ result: [] });
+      },
+    ),
+  ])
+  .flat(1);
 
 function verifyBoxToken(boxId: number, request: StrictRequest<DefaultBodyType>) {
   const expectToken = `Bearer token${boxId}`;
@@ -206,7 +216,7 @@ function getAccessConfig(boxId: number) {
 it(
   'exports a static configuration object from a tenant',
   server.boundary(async () => {
-    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(1));
+    server.use(getAccessConfig(1), ...defaultFrHandlers);
     mockFs({ ...stdLayout });
 
     const mockedExecSync = vi
@@ -228,12 +238,12 @@ it(
   server.boundary(async () => {
     let uploadedAccessConfig: unknown;
     server.use(
-      ...tokenHandlers,
       http.put('https://sandbox1.io/openidm/config/access', async ({ request }) => {
         verifyBoxToken(1, request);
         uploadedAccessConfig = await request.json();
         return HttpResponse.json(uploadedAccessConfig);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
 
@@ -252,7 +262,7 @@ it(
 it(
   'accepts tenant as a command line argument',
   server.boundary(async () => {
-    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(2));
+    server.use(getAccessConfig(2), ...defaultFrHandlers);
     mockFs({ ...stdLayout });
     const mockedExecSync = vi
       .mocked(execSync)
@@ -285,12 +295,12 @@ it(
   server.boundary(async () => {
     let uploadedAccessConfig: unknown;
     server.use(
-      ...tokenHandlers,
       http.put(`https://sandbox2.io/openidm/config/access`, async ({ request }) => {
         verifyBoxToken(2, request);
         uploadedAccessConfig = await request.json();
         return HttpResponse.json(uploadedAccessConfig);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
     // 'sandbox2', 'import' selected by command line argument.
@@ -305,7 +315,7 @@ it(
 it(
   'fails if operation not recognised',
   server.boundary(async () => {
-    server.use(...tokenHandlers);
+    server.use(...defaultFrHandlers);
     mockFs({ ...stdLayout });
     await expect(transport(rootDir, null, null, ['sandbox1', 'transmute'])).rejects.toThrow(
       'Unsupported operation transmute',
@@ -317,7 +327,6 @@ it(
   'exports an object that only exists on the tenant',
   server.boundary(async () => {
     server.use(
-      ...tokenHandlers,
       http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
         verifyBoxToken(1, request);
         return HttpResponse.json({ result: [{ _id: 'uilocale/de' }] });
@@ -326,6 +335,7 @@ it(
         verifyBoxToken(1, request);
         return HttpResponse.json({ content: 'foo' });
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout });
     const mockedSpawn = vi
@@ -342,7 +352,6 @@ it(
   'deduplicates objects that exist both locally and on the tenant',
   server.boundary(async () => {
     server.use(
-      ...tokenHandlers,
       http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
         verifyBoxToken(1, request);
         return HttpResponse.json({ result: [{ _id: 'uilocale/en' }, { _id: 'uilocale/de' }] });
@@ -351,6 +360,7 @@ it(
         verifyBoxToken(1, request);
         return HttpResponse.json({ content: 'foo' });
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
     const [objSelection, stdinLines] = mockObjectSelection(['locale en\n']);
@@ -371,12 +381,12 @@ it(
   server.boundary(async () => {
     let uploadedAccessConfig: unknown;
     server.use(
-      ...tokenHandlers,
       http.put('https://sandbox1.io/openidm/config/access', async ({ request }) => {
         verifyBoxToken(1, request);
         uploadedAccessConfig = await request.json();
         return HttpResponse.json(uploadedAccessConfig);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
     await transport(rootDir, null, null, ['sandbox1', 'import', `${rootDir}/access-config/access.json`]);
@@ -387,7 +397,7 @@ it(
 it(
   'exports access-config',
   server.boundary(async () => {
-    server.use(...tokenHandlers, ...emptyOpenidmConfig, getAccessConfig(1));
+    server.use(getAccessConfig(1), ...defaultFrHandlers);
     mockFs({ ...stdLayout });
     const mockedSpawn = vi
       .mocked(spawn)
@@ -404,12 +414,12 @@ it(
   server.boundary(async () => {
     let uploadedAccessConfig: unknown;
     server.use(
-      ...tokenHandlers,
       http.put(`https://sandbox1.io/openidm/config/access`, async ({ request }) => {
         verifyBoxToken(1, request);
         uploadedAccessConfig = await request.json();
         return HttpResponse.json(uploadedAccessConfig);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/access-config/access.json`]: jstr(accessConfig) });
     const mockedSpawn = vi
@@ -424,7 +434,6 @@ it(
   'exports locales',
   server.boundary(async () => {
     server.use(
-      ...tokenHandlers,
       http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
         verifyBoxToken(1, request);
         return HttpResponse.json({ result: [{ _id: 'uilocale/en' }, { _id: 'uilocale/de' }] });
@@ -433,6 +442,7 @@ it(
         verifyBoxToken(1, request);
         return HttpResponse.json({ content: params.locale });
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
     const mockedSpawn = vi
@@ -451,12 +461,12 @@ it(
   server.boundary(async () => {
     let uploadedLocaleContent: unknown;
     server.use(
-      ...tokenHandlers,
       http.put(`https://sandbox1.io/openidm/config/uilocale/en`, async ({ request }) => {
         verifyBoxToken(1, request);
         uploadedLocaleContent = await request.json();
         return HttpResponse.json(uploadedLocaleContent);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/locales/en.json`]: jstr({ _id: 'uilocale/en' }) });
     const mockedSpawn = vi
@@ -471,7 +481,6 @@ it(
   'exports email templates',
   server.boundary(async () => {
     server.use(
-      ...tokenHandlers,
       http.get(`https://sandbox1.io/openidm/config`, ({ request }) => {
         verifyBoxToken(1, request);
         const qf = new URL(request.url).searchParams.get('_queryFilter');
@@ -489,6 +498,7 @@ it(
             return new HttpResponse('Not found', { status: 404 });
         }
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/email-templates/hi/hi.json`]: jstr({ _id: 'emailTemplate/hi' }) });
     const mockedSpawn = vi
@@ -513,12 +523,12 @@ it(
   server.boundary(async () => {
     let uploadedEmailContent: unknown;
     server.use(
-      ...tokenHandlers,
       http.put(`https://sandbox1.io/openidm/config/emailTemplate/hi`, async ({ request }) => {
         verifyBoxToken(1, request);
         uploadedEmailContent = await request.json();
         return HttpResponse.json(uploadedEmailContent);
       }),
+      ...defaultFrHandlers,
     );
     mockFs({ ...stdLayout, [`${rootDir}/email-templates/hi/hi.json`]: jstr({ _id: 'emailTemplate/hi' }) });
     const mockedSpawn = vi
@@ -526,5 +536,79 @@ it(
       .mockImplementationOnce(() => mockObjectSelection(['email hi\n'])[0]) as unknown as typeof spawn;
     await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
     expect(uploadedEmailContent).toEqual({ _id: 'emailTemplate/hi' });
+  }),
+);
+
+it(
+  'exports journeys',
+  server.boundary(async () => {
+    server.use(
+      http.get('https://sandbox1.io/am/json/global-config/realms', ({ request }) => {
+        verifyBoxToken(1, request);
+        return HttpResponse.json({ result: [{ name: 'bravo' }, { name: 'alpha' }] });
+      }),
+      http.get(
+        'https://sandbox1.io/am/json/realms/root/realms/:realm/realm-config/authentication/authenticationtrees/trees',
+        ({ request, params }) => {
+          verifyBoxToken(1, request);
+
+          return HttpResponse.json({
+            result: [
+              params.realm === 'alpha'
+                ? { _id: 'Login', description: 'Login Journey', nodes: {} }
+                : { _id: 'Registration', description: 'Registration Journey', nodes: {} },
+            ],
+          });
+        },
+      ),
+      ...defaultFrHandlers,
+    );
+    mockFs({
+      ...stdLayout,
+      [`${rootDir}/realms/alpha/journeys/Login/Login.json`]: jstr({ _id: 'Login' }),
+      [`${rootDir}/realms/bravo/journeys`]: null,
+    });
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(
+        () => mockObjectSelection(['journey alpha Login\n', 'journey bravo Registration\n'])[0],
+      ) as unknown as typeof spawn;
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'export']);
+    await vi.waitFor(() => {
+      expect(jparse(readFileSync(`${rootDir}/realms/alpha/journeys/Login/Login.json`, 'utf8'))).toEqual({
+        _id: 'Login',
+        description: 'Login Journey',
+        nodes: {},
+      });
+      expect(jparse(readFileSync(`${rootDir}/realms/bravo/journeys/Registration/Registration.json`, 'utf8'))).toEqual({
+        _id: 'Registration',
+        description: 'Registration Journey',
+        nodes: {},
+      });
+    });
+  }),
+);
+
+it(
+  'imports journeys',
+  server.boundary(async () => {
+    let uploadedJourneyContent: unknown;
+    server.use(
+      http.put(
+        `https://sandbox1.io/am/json/realms/root/realms/:realm/realm-config/authentication/authenticationtrees/trees/Login`,
+        async ({ request }) => {
+          verifyBoxToken(1, request);
+          uploadedJourneyContent = await request.json();
+          return HttpResponse.json(uploadedJourneyContent);
+        },
+      ),
+      ...defaultFrHandlers,
+    );
+    mockFs({ ...stdLayout, [`${rootDir}/realms/alpha/journeys/Login/Login.json`]: jstr({ _id: 'Login', nodes: {} }) });
+    const mockedSpawn = vi
+      .mocked(spawn)
+      .mockImplementationOnce(() => mockObjectSelection(['journey alpha Login\n'])[0]) as unknown as typeof spawn;
+    await transport(rootDir, null, mockedSpawn, ['sandbox1', 'import']);
+    expect(uploadedJourneyContent).toEqual({ _id: 'Login', nodes: {} });
   }),
 );

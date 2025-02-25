@@ -25,24 +25,6 @@ const {
   updateLocales,
 } = require('@forgerock/fr-config-manager/packages/fr-config-push/src/scripts');
 
-// /**
-//  * Catch file or directory missing and return an empty replacement.
-//  *
-//  * @template ObjType
-//  * @param {ObjType} emptyObj
-//  * @param {() => Promise<ObjType>} callback
-//  */
-// async function handleNoEnt(emptyObj, callback) {
-//   try {
-//     return await callback();
-//   } catch (e) {
-//     if (e.code === 'ENOENT') {
-//       return emptyObj;
-//     }
-//     throw e;
-//   }
-// }
-
 /** @typedef {'pull' | 'push'} Operation */
 /**
  * @typedef {{

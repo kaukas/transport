@@ -5,7 +5,7 @@
     "alwaysStrict": true,
     "forceConsistentCasingInFileNames": true,
     "importHelpers": true,
-    "lib": ["es2022"],
+    "lib": ["dom", "es2022"],
     "module": "node16",
     "moduleResolution": "node16",
     "noFallthroughCasesInSwitch": true,

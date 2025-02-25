@@ -19,7 +19,9 @@ export default tseslint.config(
 
     plugins: {},
 
-    rules: {},
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off'
+    },
 
     languageOptions: {
       ecmaVersion: 2022,
